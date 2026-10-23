@@ -22,11 +22,19 @@ import (
 //
 // Only the agents whose sessions are files of their own can be deleted:
 // Claude Code's (and Qoder's and WorkBuddy's, kept the same way), Codex's,
-// Pi's, omp's, Cursor CLI's (a chat's folder, its store and meta.json) and
-// DeepSeek Harness's (a session's folder, and its listing's cached row).
+// Pi's, omp's, Cursor CLI's (a chat's folder, its store and meta.json),
+// DeepSeek Harness's (a session's folder, and its listing's cached row) and
+// Droid's (a transcript and its .settings.json, and its subagents'; Droid's
+// own session index is a cache it rebuilds from those files, as it does
+// when it deletes an empty draft itself; zachzhao1984 on Discord).
 // Hermes's and Alma's are rows in a database the agent keeps open and
-// writes, so they are only listed, and so are Cline's, whose sessions.db
-// lists a session whose files are gone. The agents' indexes are left as they are: Codex's
+// writes, so they are only listed, and so are OpenCode's and ZCode's, and
+// Cline's, whose sessions.db lists a session whose files are gone. Grok
+// Build's are folders, but it copies each session's text into
+// session_search.sqlite, which a delete would leave behind. Kimi Code's are
+// folders, but session_index.jsonl, which Kimi writes, names each one. A
+// Claude Desktop (Cowork) session is a Claude Code folder inside a session
+// Desktop keeps and lists itself. The agents' indexes are left as they are: Codex's
 // session_index.jsonl (names by thread id) and its state database, and
 // Claude Code's history.jsonl (the prompts typed, for the up arrow), are
 // written by the agent while it runs, and a name or a prompt left for a
@@ -58,7 +66,7 @@ type AgentCount struct {
 // those kept as files of their own, in a layout magpie knows whole.
 func Deletable(agent string) bool {
 	switch agent {
-	case "claude", "qoder", "qoder-cn", "workbuddy", "codebuddy", "codex", "pi", "omp", "cursor", "dsh":
+	case "claude", "qoder", "qoder-cn", "workbuddy", "codebuddy", "codex", "pi", "omp", "cursor", "dsh", "droid":
 		return true
 	}
 	return false
@@ -73,11 +81,11 @@ var ErrActive = errors.New("the session was written to in the last minute; it ma
 
 // Agents are the agents with sessions on this computer, by how many.
 func Agents() []AgentCount {
-	dbReadMu.Lock()
-	defer dbReadMu.Unlock()
+	storeMu.RLock()
+	defer storeMu.RUnlock()
 	mu.Lock()
 	defer mu.Unlock()
-	defer closeDBs()
+	defer useDBs()()
 	return agentCounts(allFiles())
 }
 
@@ -105,12 +113,12 @@ func agentCounts(all []file) []AgentCount {
 // ListAgent is every session of one agent, the most recently active first,
 // with no limit; one nothing was said in is listed too, to be cleared away.
 func ListAgent(agent string) []Managed {
-	dbReadMu.Lock()
-	defer dbReadMu.Unlock()
+	storeMu.RLock()
+	defer storeMu.RUnlock()
 	mu.Lock()
 	defer mu.Unlock()
 	loadCache()
-	defer closeDBs()
+	defer useDBs()()
 	return listAgent(agent, allFiles())
 }
 
@@ -120,12 +128,12 @@ func ListAgent(agent string) []Managed {
 // agents' files are looked at, and of those only the ones whose session id
 // is inside the file are read when they changed.
 func NativeIDs(agents map[string]bool) map[string]map[string]bool {
-	dbReadMu.Lock()
-	defer dbReadMu.Unlock()
+	storeMu.RLock()
+	defer storeMu.RUnlock()
 	mu.Lock()
 	defer mu.Unlock()
 	loadCache()
-	defer closeDBs()
+	defer useDBs()()
 	return nativeIDs(agents, allFiles())
 }
 
@@ -146,12 +154,12 @@ type ManageView struct {
 // Only native's agents and the one picked are read: a change to another
 // agent's sessions waits for a page that shows it (#2776).
 func Manage(native map[string]bool, pick func([]AgentCount, map[string]map[string]bool) string) ManageView {
-	dbReadMu.Lock()
-	defer dbReadMu.Unlock()
+	storeMu.RLock()
+	defer storeMu.RUnlock()
 	mu.Lock()
 	defer mu.Unlock()
 	loadCache()
-	defer closeDBs()
+	defer useDBs()()
 	all := allFiles()
 	v := ManageView{Agents: agentCounts(all), Native: nativeIDs(native, all)}
 	v.Agent = pick(v.Agents, v.Native)
@@ -298,12 +306,12 @@ func Delete(agent, id string) (Trashed, error) {
 	if !safeID.MatchString(id) {
 		return Trashed{}, errors.New("no such session")
 	}
-	dbReadMu.Lock()
-	defer dbReadMu.Unlock()
+	storeMu.Lock()
+	defer storeMu.Unlock()
 	mu.Lock()
 	defer mu.Unlock()
 	loadCache()
-	defer closeDBs()
+	defer useDBs()()
 	all := allFiles()
 	groups := map[string][]file{}
 	var mine []file
@@ -319,7 +327,7 @@ func Delete(agent, id string) (Trashed, error) {
 	var s Session
 	price := pricer()
 	for _, g := range groups {
-		if one, _ := assemble(g, price); one.ID == id {
+		if one, _ := assembleListed(g, price); one.ID == id {
 			fs, s = g, one
 			break
 		}
@@ -436,6 +444,14 @@ func sessionPaths(agent, id string, fs []file) []string {
 	for _, f := range fs {
 		if !f.main && !inside(f.path, out) {
 			add(f.path)
+		}
+	}
+	if agent == "droid" {
+		// each transcript's settings beside it: what it spent, its model
+		for _, f := range fs {
+			if f.manifest != "" && !inside(f.manifest, out) {
+				add(f.manifest)
+			}
 		}
 	}
 	if agent == "claude" {

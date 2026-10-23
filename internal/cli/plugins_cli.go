@@ -465,9 +465,13 @@ func pluginLogin(ctx context.Context, name, method string) error {
 	ctx = provider.Via(ctx, provider.PluginID(pp.ID))
 	var saved plugin.Saved
 	if pp.Methods[m].Type == "api" {
-		key, err := secret("key", keyPrompt(pp.Name, pp.Methods[m]), false)
-		if err != nil {
-			return err
+		key := ""
+		if !pp.Methods[m].Keyless {
+			var err error
+			key, err = secret("key", keyPrompt(pp.Name, pp.Methods[m]), false)
+			if err != nil {
+				return err
+			}
 		}
 		if saved, err = plugin.APIKey(ctx, pp.ID, m, inputs, key, plugin.NewAccount); err != nil {
 			return err
@@ -480,7 +484,9 @@ func pluginLogin(ctx context.Context, name, method string) error {
 		if a.URL != "" {
 			fmt.Println("Sign in in your browser. If it didn't open, go to:")
 			fmt.Println(faint.Render(a.URL))
-			openInBrowser(a.URL)
+			if !a.Opened {
+				openInBrowser(a.URL)
+			}
 		}
 		if a.Instructions != "" {
 			fmt.Println(a.Instructions)

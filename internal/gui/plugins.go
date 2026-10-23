@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"regexp"
@@ -30,6 +31,7 @@ type pluginSubJSON struct {
 	Spec     string          `json:"spec"` // the plugin
 	Methods  []plugin.Method `json:"methods"`
 	SignedIn bool            `json:"signedIn"`
+	Single   bool            `json:"single,omitempty"`
 	Models   int             `json:"models"`
 	// Options are the switches the plugin declares (auth.options, #2038),
 	// each with where it stands now
@@ -80,7 +82,7 @@ func pluginSubs() []pluginSubJSON {
 		}
 		out = append(out, pluginSubJSON{
 			ID: provider.PluginID(pp.ID), PID: pp.ID, Name: pp.Name, Icon: pluginIcon(pp), Spec: pp.Spec,
-			Methods: pp.Methods, SignedIn: pp.SignedIn, Models: len(pp.Models), Options: opts,
+			Methods: pp.Methods, SignedIn: pp.SignedIn, Single: pp.Single, Models: len(pp.Models), Options: opts,
 		})
 	}
 	return out
@@ -495,9 +497,15 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 	// repositories on GitHub tagged magpie-plugin: nobody's list, shown
 	// apart as not reviewed, installed from the repository
 	mux.HandleFunc("GET /api/plugins/github", func(rw http.ResponseWriter, r *http.Request) {
+		// Try again asks GitHub at once when the list standing isn't its
+		// whole answer
+		if r.URL.Query().Get("again") != "" {
+			plugin.TaggedAskAgain()
+		}
+		got, err := plugin.TaggedRepos(r.Context())
 		// each one's own picture as the page can show it, kept here as an
 		// installed plugin's is (a data URI isn't sent on to the page)
-		repos := append([]plugin.Tagged(nil), plugin.TaggedRepos(r.Context())...)
+		repos := append([]plugin.Tagged(nil), got...)
 		said := make([]string, len(repos))
 		for i := range repos {
 			said[i] = repos[i].Icon
@@ -505,7 +513,17 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 		for i, ic := range provider.RepoIcons(said, 3*time.Second) {
 			repos[i].Icon = ic
 		}
-		writeJSON(rw, map[string]any{"repos": repos, "topic": plugin.Topic})
+		out := map[string]any{"repos": repos, "topic": plugin.Topic}
+		// why the list isn't GitHub's whole answer: the page says so with
+		// Try again, rather than the section reading as there being none
+		if err != nil {
+			out["error"] = err.Error()
+			var m *plugin.TaggedMissing
+			if errors.As(err, &m) {
+				out["error"], out["missing"] = m.Why.Error(), m.Missing
+			}
+		}
+		writeJSON(rw, out)
 	})
 	// the commit each installed git plugin's repository is at now (asked
 	// at most every ten minutes), by spec; one that didn't answer is left
@@ -717,7 +735,7 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 			return
 		}
 		var failed string
-		if w != nil {
+		if w != nil && !st.Opened {
 			failed = openError(w, st.URL)
 		}
 		writeJSON(rw, signInOpened{st, failed})
