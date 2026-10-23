@@ -59,8 +59,12 @@ func bareModel(m string) string {
 // is the member another magpie's routing group sent it to (GroupRouted),
 // nor a vendor's own name for the deployment serving the model
 // (ServingName), nor the model a relay sold under a name of its own
-// (RelayRenamed).
+// (RelayRenamed), nor what comes back for a deployment asked for by its id
+// (EndpointID).
 func Swapped(sent, served string) bool {
+	if EndpointID(sent) {
+		return false
+	}
 	a, b := bareModel(sent), bareModel(served)
 	return a != "" && b != "" && squash(a) != squash(b) && a != "auto" && squash(bareModel(provider.EffortFamily(a))) != squash(b) && !GroupRouted(sent, served) && !ServingName(sent, served) && !RelayRenamed(sent, served)
 }
@@ -89,6 +93,25 @@ func RelayRenamed(sent, served string) bool {
 // for a Gemini model (GeminiServing), xAI's for a Grok one (GrokServing).
 func ServingName(sent, served string) bool {
 	return GeminiServing(sent, served) || GrokServing(sent, served)
+}
+
+// endpointID is Volcengine Ark's id for an inference endpoint
+// (ep-20261021200314-p76lm): a deployment asked for by id, not a model by
+// name. No model id begins ep-.
+var endpointID = regexp.MustCompile(`(?i)^ep-[a-z0-9]+(?:[-_][a-z0-9]+)*$`)
+
+// EndpointID reports whether sent is a vendor's id for the deployment that
+// serves a model rather than a model's name. A request for one names no
+// model to compare a reply's with: Ark answers an endpoint's id with the
+// model behind it (deepseek-v4-1-flash-261017 for
+// ep-20261021200314-p76lm), which is the model asked for, not another
+// swapped in.
+func EndpointID(sent string) bool {
+	s := strings.TrimSpace(sent)
+	if i := strings.LastIndexByte(s, '/'); i >= 0 {
+		s = s[i+1:]
+	}
+	return endpointID.MatchString(s)
 }
 
 // GrokServing reports whether served is xAI's name for the build serving
