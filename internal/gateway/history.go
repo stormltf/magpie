@@ -314,12 +314,13 @@ func History(day string) (days []HistoryDay, routes []Route, cut bool) {
 // answered as deepseek-v4-1-flash) wasn't swapped (usage.SameSpelled), nor
 // was one answered under Google's name for the deployment serving its
 // Gemini model (gemini-3.8-flash as gemini-3.8-flash-n) or xAI's for a Grok
-// one (grok-4.7 as grok-4.7-build), usage.ServingName.
+// one (grok-4.7 as grok-4.7-build), usage.ServingName, nor one that asked
+// for an endpoint by its id (ep-…), usage.EndpointID.
 func (r *Route) routedAgain() {
 	for i := range r.Tries {
 		if tr := &r.Tries[i]; tr.Swapped && usage.GroupRouted(tr.Model, tr.Served) {
 			tr.Swapped, tr.Routed = false, true
-		} else if tr.Swapped && (usage.SameSpelled(tr.Model, tr.Served) || usage.ServingName(tr.Model, tr.Served)) {
+		} else if tr.Swapped && (usage.SameSpelled(tr.Model, tr.Served) || usage.ServingName(tr.Model, tr.Served) || usage.EndpointID(tr.Model)) {
 			tr.Swapped = false
 		}
 	}
