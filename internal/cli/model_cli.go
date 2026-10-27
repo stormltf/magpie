@@ -330,6 +330,8 @@ func modelPrice(args []string) error {
 		switch priceFrom(settings.Load(), p.ID, model) {
 		case "model":
 			fmt.Println(faint.Render("  · what you said this model costs · --reset takes that away"))
+		case "family":
+			fmt.Println(faint.Render("  · what you said this model costs under another spelling of its id · magpie model prices lists it"))
 		case "provider":
 			fmt.Println(faint.Render("  · what you said every model of this provider costs · magpie model price " +
 				typedRef(p.ID+"/*") + " --reset takes that away"))
@@ -575,11 +577,17 @@ func priceFrom(s settings.Settings, providerID, model string) string {
 	if _, ok := statedPrice(s.ModelPrices, providerID+"/"+model); ok {
 		return "model"
 	}
+	if provider.FamilyPriceKey(s, providerID+"/", model) != "" {
+		return "family"
+	}
 	if _, ok := statedPrice(s.ModelPrices, providerID+"/*"); ok {
 		return "provider"
 	}
 	if _, ok := statedPrice(s.ModelPrices, provider.AnyPriceKey(model)); ok {
 		return "any"
+	}
+	if provider.FamilyPriceKey(s, settings.AnyProvider, model) != "" {
+		return "family"
 	}
 	if _, given := s.ModelPrices[providerID+"/"+model]; given {
 		return "ignored"

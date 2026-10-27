@@ -449,6 +449,9 @@ func TestPriceFrom(t *testing.T) {
 		want   string
 	}{
 		{"the price given for this model", map[string]settings.ModelPrice{"relay/sol": own}, "model"},
+		{"the price given for another spelling of it", map[string]settings.ModelPrice{"relay/sol-20250101": own}, "family"},
+		{"its other spelling beats the provider's", map[string]settings.ModelPrice{"relay/sol-20250101": own, "relay/*": wide}, "family"},
+		{"another spelling of it from any provider", map[string]settings.ModelPrice{"*/sol-20250101": own}, "family"},
 		{"the price given for every model of it", map[string]settings.ModelPrice{"relay/*": own}, "provider"},
 		{"its own beats the provider's", map[string]settings.ModelPrice{"relay/sol": own, "relay/*": wide}, "model"},
 		{"a price with a part missing is passed over", map[string]settings.ModelPrice{"relay/sol": broken}, "ignored"},
@@ -465,7 +468,7 @@ func TestPriceFrom(t *testing.T) {
 }
 
 // priceFrom in isolation says where a price came from; what the user reads
-// is the line under it. These are the four, and each is the one a wrong
+// is the line under it. These are the five, and each is the one a wrong
 // priceFrom would swap for another — a price set but passed over read as
 // the provider's own is the one that would send a user to set it again.
 func TestModelPriceCmdSaysWhereThePriceCameFrom(t *testing.T) {
@@ -536,6 +539,15 @@ func TestModelPriceCmdSaysWhereThePriceCameFrom(t *testing.T) {
 		if err := settings.Save(s); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// a price given for another spelling of the model is the model's, and
+	// is said as that rather than as the provider's or the maker's
+	leave("*/claude-opus-5.5", settings.ModelPrice{Input: new(2.0), Output: new(3.0), CacheRead: new(0.0), CacheWrite: new(0.0)})
+	if out := show("claude-opus-5-5"); !strings.Contains(out, "what you said this model costs under another spelling of its id") {
+		t.Errorf("a price for another spelling: printed %q, want it to say the price is the user's", out)
+	}
+	if err := modelCmd([]string{"price", "*/claude-opus-5.5", "--reset"}); err != nil {
+		t.Fatal(err)
 	}
 	// "m" is a model nothing prices, so a broken price there ends the
 	// command before it says where the price came from; one a maker prices

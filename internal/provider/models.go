@@ -1785,7 +1785,7 @@ func (p Provider) ListPrice(model string) (catalog.Price, bool) {
 	if pr, ok := p.grokFastPrice(model); ok {
 		return pr, true
 	}
-	names := pricedNames(model)
+	names := priceNames(model)
 	if p.kimiCodeMember() {
 		if id, ok := kimiCodeAPI[strings.ToLower(strings.TrimSpace(model))]; ok {
 			names = append(names, id)
@@ -2062,7 +2062,7 @@ var kimiCodeAPI = map[string]string{
 // that makes the models it serves lists it; for a call whose provider has
 // gone since.
 func MakerPrice(model string) (catalog.Price, bool) {
-	for _, m := range pricedNames(model) {
+	for _, m := range priceNames(model) {
 		if pr, ok := catalog.PricedBy(makerPriceCatalogs(), m); ok {
 			return pr, true
 		}
@@ -2123,15 +2123,24 @@ func EffectivePriceIn(s settings.Settings, providerID, model string) (catalog.Pr
 func priceOf(s settings.Settings, p Provider, known bool, model string) (catalog.Price, bool) {
 	id := p.ID
 	// then what they said the model costs from any provider (*/model):
-	// still the user's word, so before any list price
-	for _, key := range [...]string{id + "/" + model, id + "/*", AnyPriceKey(model)} {
-		if m, ok := s.ModelPrices[key]; ok {
-			if pr, bad := m.Price(); bad == "" {
-				// a Claude model's 1-hour cache write left out: 2× input
-				catalog.OneHourFor(model, &pr)
-				return pr, true
-			}
+	// still the user's word, so before any list price. A price for another
+	// spelling of the same model counts too, at the same provider first:
+	// one model is one price, however a vendor dates its snapshots
+	if pr, ok := statedPriceIn(s, id+"/"+model, model); ok {
+		return pr, true
+	}
+	if id != "" {
+		if pr, ok := familyPriceIn(s, id+"/", model); ok {
+			return pr, true
 		}
+	}
+	for _, key := range [...]string{id + "/*", AnyPriceKey(model)} {
+		if pr, ok := statedPriceIn(s, key, model); ok {
+			return pr, true
+		}
+	}
+	if pr, ok := familyPriceIn(s, settings.AnyProvider, model); ok {
+		return pr, true
 	}
 	if !known {
 		if pr, ok := MakerPrice(model); ok {
@@ -2151,6 +2160,73 @@ func priceOf(s settings.Settings, p Provider, known bool, model string) (catalog
 		pr = pr.Times(p.PriceRate)
 	}
 	return pr, ok
+}
+
+// statedPriceIn is the price the user gave at key, when every part of it is
+// usable, with a Claude model's 1-hour cache write left out filled in at 2×
+// input.
+func statedPriceIn(s settings.Settings, key, model string) (catalog.Price, bool) {
+	m, ok := s.ModelPrices[key]
+	if !ok {
+		return catalog.Price{}, false
+	}
+	pr, bad := m.Price()
+	if bad != "" {
+		return catalog.Price{}, false
+	}
+	catalog.OneHourFor(model, &pr)
+	return pr, true
+}
+
+// familyPriceKey is the key the user's price for another spelling of model
+// is stored at within scope (a provider's id and "/", or */), "" when they
+// gave none: the price is the model's, so a price for kimi-k3-1-pro prices
+// kimi-k3-1-pro-261024, and one for kimi-k3.1-pro does too, by the rule
+// that makes two ids one model (sameModel). The keys are read in order, so
+// two spellings priced apart answer the same way every time.
+func familyPriceKey(s settings.Settings, scope, model string) string {
+	want := sameModel(model)
+	if want == "" {
+		return ""
+	}
+	var keys []string
+	for key := range s.ModelPrices {
+		if strings.HasPrefix(key, scope) && sameModel(strings.TrimPrefix(key, scope)) == want {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		if _, ok := statedPriceIn(s, key, model); ok {
+			return key
+		}
+	}
+	return ""
+}
+
+// FamilyPriceKey is familyPriceKey for a caller outside this package: the
+// CLI says which key a price a model is counted at came from.
+func FamilyPriceKey(s settings.Settings, scope, model string) string {
+	return familyPriceKey(s, scope, model)
+}
+
+// familyPriceIn is the price at familyPriceKey, and whether there is one.
+func familyPriceIn(s settings.Settings, scope, model string) (catalog.Price, bool) {
+	key := familyPriceKey(s, scope, model)
+	if key == "" {
+		return catalog.Price{}, false
+	}
+	return statedPriceIn(s, key, model)
+}
+
+// AnyPriceIn is what the user said a model costs from any provider, by its
+// own id or another spelling of the same model (familyPriceIn): what a
+// session's model, which names no provider, can take from them.
+func AnyPriceIn(s settings.Settings, model string) (catalog.Price, bool) {
+	if pr, ok := statedPriceIn(s, AnyPriceKey(model), model); ok {
+		return pr, true
+	}
+	return familyPriceIn(s, settings.AnyProvider, model)
 }
 
 // EntryPriceIn is what a call to an entry of the catalog costs the user,
@@ -2244,15 +2320,28 @@ func pricedNames(model string) []string {
 	return out
 }
 
+// priceNames are the names the catalogs are asked for a model's price
+// under, the model's own first: the aliases pricedNames knows, and the name
+// vendors agree on (sameModel), which drops a snapshot date and writes a
+// version's dot as a dash. A call asks for kimi-k3-1-pro-261024 where
+// models.dev lists kimi-k3.1-pro: one model is one price.
+func priceNames(model string) []string {
+	out := pricedNames(model)
+	if fam := sameModel(model); fam != "" && fam != strings.ToLower(strings.TrimSpace(model)) {
+		out = append(out, fam)
+	}
+	return out
+}
+
 // PricedName is the catalog ID used for a list-price estimate. Prefer a
 // directly listed model before falling back to a documented alias.
 func PricedName(model string) string {
-	n := pricedNames(model)
-	for _, name := range n {
+	for _, name := range priceNames(model) {
 		if _, ok := catalog.PricedBy(makerPriceCatalogs(), name); ok {
 			return name
 		}
 	}
+	n := pricedNames(model)
 	return n[len(n)-1]
 }
 

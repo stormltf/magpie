@@ -1842,14 +1842,11 @@ func priceOf(s settings.Settings, model string) (catalog.Price, bool) {
 		}
 	}
 	bare := strings.ToLower(m[strings.LastIndexByte(m, '/')+1:])
-	// what the user said the model costs from any provider (*/model): the
-	// only price a bare id, or one models.dev has stopped listing, can take
-	// from them
-	if p, ok := s.ModelPrices[provider.AnyPriceKey(bare)]; ok {
-		if pr, bad := p.Price(); bad == "" {
-			catalog.OneHourFor(bare, &pr)
-			return pr, true
-		}
+	// what the user said the model costs from any provider (*/model), or
+	// from another spelling of it: the only price a bare id, or one
+	// models.dev has stopped listing, can take from them
+	if pr, ok := provider.AnyPriceIn(s, bare); ok {
+		return pr, true
 	}
 	// a Grok id at an effort (grok-4.7-high) at its model's price, and a
 	// version spelled with a dot (Copilot's claude-opus-4.6) at its maker's
