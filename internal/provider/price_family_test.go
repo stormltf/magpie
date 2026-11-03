@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // familyCatalog is a models.dev cache in which Kimi's model is listed as
@@ -94,5 +96,27 @@ func TestProviderPriceCoversTheModelsSpellings(t *testing.T) {
 	}
 	if pr, ok := EffectivePrice("ark", "other-model-261024"); !ok || pr.Input != 1 {
 		t.Errorf("EffectivePrice = %+v, %v; want the provider's $1", pr, ok)
+	}
+}
+
+func TestFamilyPriceKeepsPeakAndRateWindow(t *testing.T) {
+	priceHome(t)
+	p := Provider{ID: "deepseek", PriceRate: 7,
+		RateWindows: []RateWindow{{Start: "00:00", End: "24:00", Rate: 3}}}
+	price := settings.StatedPrice(catalog.Price{Input: 2, Output: 10, CacheRead: 0.2})
+	for _, key := range []string{"deepseek/deepseek-v4.1-flash", "*/deepseek-v4.1-flash"} {
+		s := settings.Settings{ModelPrices: map[string]settings.ModelPrice{
+			key: price,
+		}}
+		for _, c := range []struct {
+			hour int
+			want float64
+		}{{2, 12}, {11, 6}} {
+			at := time.Date(2026, 10, 29, c.hour, 0, 0, 0, time.UTC)
+			pr, ok := p.PriceAt(s, "deepseek-v4-1-flash-261017", at)
+			if !ok || pr.In(at).Input != c.want {
+				t.Errorf("%s at %s: price %+v, known %v; want input %v", key, at, pr, ok, c.want)
+			}
+		}
 	}
 }

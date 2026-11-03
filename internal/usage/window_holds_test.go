@@ -175,6 +175,56 @@ func TestWindowHoldsNeedsTheWholeWindowLogged(t *testing.T) {
 	}
 }
 
+// A plan key's calls answer to the key, not to an account: the ledger
+// names the key (ProviderKeyName) and no account (#557), and the card a
+// plan key is on names the key too (#3747) — so a window is reckoned from
+// the calls routed on that key, including calls logged before the card
+// could tell a whole (the key was named all along; nothing is backfilled).
+func TestWindowHoldsReckonsAPlanKeysWindowByItsName(t *testing.T) {
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	five, week := now.Add(3*time.Hour), now.Add(3*24*time.Hour)
+	qs := []provider.SubscriptionQuota{
+		{Provider: "kimi-code", User: "new", Windows: []provider.QuotaWindow{
+			{Name: "5 hours", Used: 87, ResetsAt: &five, Span: 5 * time.Hour},
+		}},
+		{Provider: "kimi-code", User: "old", Windows: []provider.QuotaWindow{
+			{Name: "5 hours", Used: 74, ResetsAt: &five, Span: 5 * time.Hour},
+			{Name: "7 days", Used: 18, ResetsAt: &week, Span: 7 * 24 * time.Hour},
+		}},
+	}
+	call := func(ago time.Duration, key string, in, out int) Record {
+		return Record{Time: now.Add(-ago), Agent: "claude-code", Provider: "kimi-code", ProviderKeyName: key, Model: "kimi-k2", Input: in, Output: out, Status: 200}
+	}
+	recs := []Record{
+		call(time.Hour, "new", 1500, 1000),     // in the 5 hours of new
+		call(3*time.Hour, "new", 9000, 1000),   // before the 5 hours began: not its whole's calls
+		call(2*time.Hour, "old", 2000, 2000),   // in the 5 hours of old
+		call(2*24*time.Hour, "old", 1000, 500), // in the week of old, and the 5 hours' call in it too
+		call(time.Hour, "third", 5000, 1000),   // a key no card names: none of the cards'
+	}
+	read := func(fn func(Record)) {
+		for _, r := range recs {
+			fn(r)
+		}
+	}
+	got := windowHolds(qs, now, now.Add(-30*24*time.Hour), func(Record) *catalog.Price { return nil }, provider.Renames{}, nil, read)
+	newHolds, oldFive, oldWeek := got[0].Windows[0], got[1].Windows[0], got[1].Windows[1]
+	if h := newHolds.Holds; h == nil || h.Routed.Tokens != 2500 || h.Tokens != 2874 {
+		t.Fatalf("new's 5 hours: %+v (why %q), want 2500 routed, whole 2874", newHolds.Holds, newHolds.HoldsWhy)
+	}
+	if h := oldFive.Holds; h == nil || h.Routed.Tokens != 4000 || h.Tokens != 5405 {
+		t.Fatalf("old's 5 hours: %+v (why %q), want 4000 routed, whole 5405", oldFive.Holds, oldFive.HoldsWhy)
+	}
+	if h := oldWeek.Holds; h == nil || h.Routed.Tokens != 5500 || h.Tokens != 30556 {
+		t.Fatalf("old's week: %+v (why %q), want 5500 routed, whole 30556", oldWeek.Holds, oldWeek.HoldsWhy)
+	}
+	for _, w := range []*provider.QuotaWindow{&newHolds, &oldFive, &oldWeek} {
+		if w.HoldsWhy != "" {
+			t.Errorf("%s: reckoned, and why %q", w.Name, w.HoldsWhy)
+		}
+	}
+}
+
 // A month's window began on the same day a month before its reset, not 30
 // days before: Kiro's credits reset on the 1st.
 func TestWindowBoundsOfAMonth(t *testing.T) {
@@ -455,5 +505,40 @@ func TestWindowHoldsReckonsAntigravityPools(t *testing.T) {
 		if w := got[x[0]].Windows[x[1]]; w.Holds != nil || w.HoldsWhy != "" {
 			t.Errorf("model window %s: reckoned %+v, why %q", w.Name, w.Holds, w.HoldsWhy)
 		}
+	}
+}
+
+// The ledger prices a call whose own id has no price as the model the
+// reply named (Served, #1498). A window's whole is priced the same way:
+// one such call otherwise has no API price, and that drops the dollar
+// whole for every other call in the window.
+func TestHoldsPriceTheModelTheReplyNamed(t *testing.T) {
+	holdsHome(t)
+	priceOf := apiPricer()
+	named := Record{Provider: "relay", Model: "moonshot-kimi-k3", Served: "gpt-5.5"}
+	if pr := priceOf(named); pr == nil || pr.Input != 1.25 {
+		t.Fatalf("the model the reply named wasn't its API price: %+v", pr)
+	}
+	same := named
+	same.Served = named.Model
+	if pr := priceOf(same); pr != nil {
+		t.Fatalf("a reply that names the same unpriced id was priced: %+v", pr)
+	}
+	own := Record{Provider: "relay", Model: "claude-opus-4-7", Served: "gpt-5.5"}
+	if pr := priceOf(own); pr == nil || pr.Input != 5 {
+		t.Fatalf("the asked model's own price lost: %+v", pr)
+	}
+
+	now := holdClock(t, time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC))
+	reset := now.Add(2 * time.Hour)
+	Append(Record{Time: now.Add(-8 * 24 * time.Hour), Agent: "codex", Provider: "codex", ProviderAccount: "sam@example.com",
+		Model: "gpt-5.5", Input: 1000, Status: 200})
+	Append(Record{Time: now.Add(-time.Hour), Agent: "codex", Provider: "codex", ProviderAccount: "sam@example.com",
+		Model: "moonshot-kimi-k3", Served: "gpt-5.5", Input: 1000, Status: 200})
+	qs := WithWindowHolds([]provider.SubscriptionQuota{{Provider: "codex", User: "sam@example.com", Windows: []provider.QuotaWindow{
+		{Name: "5 hours", Used: 10, ResetsAt: &reset, Span: 5 * time.Hour},
+	}}}, now)
+	if h := qs[0].Windows[0].Holds; h == nil || !h.Priced || h.Cost <= 0 {
+		t.Fatalf("5 hours: %+v, a priced reply left the dollar whole out", h)
 	}
 }
